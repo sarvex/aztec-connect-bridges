@@ -8,8 +8,9 @@ import {AztecTypes} from "../../aztec/libraries/AztecTypes.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {IRollupProcessor} from "../../aztec/interfaces/IRollupProcessor.sol";
 import {ISetToken} from "../../interfaces/set/ISetToken.sol";
+import {ICETH} from "../../interfaces/compound/ICETH.sol";
 import {IExchangeIssuanceLeveraged} from "../../interfaces/set/IExchangeIssuanceLeveraged.sol";
-import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import {IDebtIssuanceModule} from "../../interfaces/set/IDebtIssuanceModule.sol";
 
 /**
  * @title IndexCoop Leveraged Tokens Bridge
@@ -17,21 +18,18 @@ import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol
  * a DEX or by issuing/redeeming icEth set tokens.
  */
 contract IndexLeverageBridge is BridgeBase {
-    using SafeERC20 for IERC20;
+    IDebtIssuanceModule public constant DEBT_ISSUANCE = IDebtIssuanceModule(0x39F024d621367C044BacE2bf0Fb15Fb3612eCB92);
+    // solhint-disable-next-line
+    ICETH public constant cETH = ICETH(0x4Ddc2D193948926D02f9B1fE9e1daa0718270ED5);
+    ISetToken public constant ETH2X = ISetToken(0xAa6E8127831c9DE45ae56bB1b0d4D4Da6e5665BD);
 
-    address public constant EXCHANGE_ISSUANCE = 0xB7cc88A13586D862B97a677990de14A122b74598;
-    address public constant CURVE = 0xDC24316b9AE028F1497c275EB9192a3Ea0f67022;
-    address public constant STETH = 0xae7ab96520DE3A18E5e111B5EaAb095312D7fE84;
-    address public constant ETH = 0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE;
-    address public constant ICETH = 0x7C07F7aBe10CE8e33DC6C5aD68FE033085256A84;
-
-    uint256 public constant PRECISION = 1e18;
+    uint256 public constant PRECISION = 1e8;
     uint256 public constant DUST = 1;
 
     constructor(address _rollupProcessor) BridgeBase(_rollupProcessor) {
-        // Tokens can be pre approved since the bridge should not hold any tokens.
-        IERC20(ICETH).safeIncreaseAllowance(address(EXCHANGE_ISSUANCE), type(uint256).max);
-        IERC20(ICETH).safeIncreaseAllowance(ROLLUP_PROCESSOR, type(uint256).max);
+        // Tokens can be pre approved since the bridge is stateless
+        cETH.approve(address(DEBT_ISSUANCE), type(uint256).max);
+        ETH2X.approve(address(ROLLUP_PROCESSOR), type(uint256).max);
     }
 
     receive() external payable {}
@@ -73,71 +71,35 @@ contract IndexLeverageBridge is BridgeBase {
             bool
         )
     {
-        /**
-            Inputs that are too small will result in a loss of precision
-            in flashloan calculations. In getAmountBasedOnRedeem() debtOWned
-            and colInEth will lose precision. Dito in ExchangeIssuance.
-        */
-        if (_totalInputValue < 1e18) revert ErrorLib.InvalidInputAmount();
-
         uint256 amountOut = (_totalInputValue * _auxData) / PRECISION;
 
         if (
             _inputAssetA.assetType == AztecTypes.AztecAssetType.ETH &&
-            _outputAssetA.erc20Address == ICETH &&
+            _outputAssetA.erc20Address == address(ETH2X) &&
             _outputAssetB.assetType == AztecTypes.AztecAssetType.ETH
         ) {
-            // Mint leveraged token
+            cETH.mint{value: _totalInputValue}();
+            DEBT_ISSUANCE.issue(ETH2X, amountOut, address(this));
 
-            uint24[] memory fee;
-            address[] memory pathToSt = new address[](2);
-            pathToSt[0] = ETH;
-            pathToSt[1] = STETH;
+            // Unwrap the remaining cETH in order to return ETH
+            cETH.redeem(cETH.balanceOf(address(this)) - DUST);
 
-            IExchangeIssuanceLeveraged.SwapData memory issueData = IExchangeIssuanceLeveraged.SwapData(
-                pathToSt,
-                fee,
-                CURVE,
-                IExchangeIssuanceLeveraged.Exchange.Curve
-            );
-
-            IExchangeIssuanceLeveraged(EXCHANGE_ISSUANCE).issueExactSetFromETH{value: _totalInputValue}(
-                ISetToken(ICETH),
-                amountOut,
-                issueData,
-                issueData
-            );
-
-            outputValueA = ISetToken(ICETH).balanceOf(address(this)) - DUST;
+            outputValueA = ISetToken(ETH2X).balanceOf(address(this)) - DUST;
             outputValueB = address(this).balance;
+
+            if (outputValueB > 0) {
+                IRollupProcessor(ROLLUP_PROCESSOR).receiveEthFromBridge{value: outputValueB}(_interactionNonce);
+            }
         } else if (
-            _inputAssetA.erc20Address == ICETH &&
+            _inputAssetA.erc20Address == address(ETH2X) &&
             _outputAssetA.assetType == AztecTypes.AztecAssetType.ETH &&
             _outputAssetB.assetType == AztecTypes.AztecAssetType.NOT_USED
         ) {
-            // Redeem underlying
+            // Redeem ETH2X for cETH
+            DEBT_ISSUANCE.redeem(ETH2X, _totalInputValue, address(this));
 
-            // Creating a SwapData structure used to specify a path in a DEX in the ExchangeIssuance contract
-            uint24[] memory fee;
-            address[] memory pathToEth = new address[](2);
-            pathToEth[0] = STETH;
-            pathToEth[1] = ETH;
-
-            IExchangeIssuanceLeveraged.SwapData memory redeemData = IExchangeIssuanceLeveraged.SwapData(
-                pathToEth,
-                fee,
-                CURVE,
-                IExchangeIssuanceLeveraged.Exchange.Curve
-            );
-
-            // Redeem icETH for eth
-            IExchangeIssuanceLeveraged(EXCHANGE_ISSUANCE).redeemExactSetForETH(
-                ISetToken(ICETH),
-                _totalInputValue,
-                amountOut,
-                redeemData,
-                redeemData
-            );
+            // Unwrap cETH balance in order to return ETH
+            cETH.redeem(cETH.balanceOf(address(this)) - DUST);
 
             outputValueA = address(this).balance;
             IRollupProcessor(ROLLUP_PROCESSOR).receiveEthFromBridge{value: outputValueA}(_interactionNonce);
