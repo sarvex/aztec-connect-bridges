@@ -69,12 +69,14 @@ contract TroveBridgeTestBase is TestUtil {
 
     function _openTrove() internal {
         // Set owner's balance
-        vm.deal(OWNER, OWNER_ETH_BALANCE);
+        deal(OWNER, OWNER_ETH_BALANCE);
 
         // Set msg.sender to OWNER
-        vm.startPrank(OWNER);
+        emit log_named_uint("owner balance", OWNER.balance);
 
         uint256 amtToBorrow = bridge.computeAmtToBorrow(OWNER_ETH_BALANCE);
+        emit log_named_uint("owner balance", OWNER.balance);
+
         uint256 nicr = (OWNER_ETH_BALANCE * NICR_PRECISION) / amtToBorrow;
 
         // The following is Solidity implementation of https://github.com/liquity/dev#opening-a-trove
@@ -84,6 +86,7 @@ contract TroveBridgeTestBase is TestUtil {
         (address upperHint, address lowerHint) = SORTED_TROVES.findInsertPosition(nicr, approxHint, approxHint);
 
         // Open the trove
+        vm.prank(OWNER);
         bridge.openTrove{value: OWNER_ETH_BALANCE}(upperHint, lowerHint, MAX_FEE);
 
         uint256 price = TROVE_MANAGER.priceFeed().fetchPrice();
@@ -101,8 +104,6 @@ contract TroveBridgeTestBase is TestUtil {
 
         assertEq(address(bridge).balance, 0, "Bridge holds ETH after trove opening");
         assertEq(tokens["LUSD"].erc.balanceOf(address(bridge)), bridge.DUST(), "Bridge holds LUSD after trove opening");
-
-        vm.stopPrank();
     }
 
     function _closeTrove() internal {
