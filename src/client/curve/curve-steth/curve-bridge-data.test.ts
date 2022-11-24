@@ -1,5 +1,7 @@
 import { CurveStethBridgeData } from "./curve-bridge-data.js";
 import {
+  IChainlinkOracle,
+  IChainlinkOracle__factory,
   IWstETH,
   ICurvePool,
   ILidoOracle,
@@ -11,6 +13,7 @@ import { AztecAsset, AztecAssetType } from "../../bridge-data.js";
 import { BigNumber } from "ethers";
 import { EthAddress } from "@aztec/barretenberg/address";
 import { jest } from "@jest/globals";
+import { BridgeCallData } from "@aztec/barretenberg/bridge_call_data";
 import { JsonRpcProvider } from "../../aztec/provider/json_rpc_provider.js";
 
 type Mockify<T> = {
@@ -18,10 +21,13 @@ type Mockify<T> = {
 };
 
 describe("curve steth bridge data", () => {
+  const bridgeAddressId = 17;
+
   let curveBridgeData: CurveStethBridgeData;
   let wstethContract: Mockify<IWstETH>;
   let curvePoolContract: Mockify<ICurvePool>;
   let lidoOracleContract: Mockify<ILidoOracle>;
+  let chainlinkOracleContract: Mockify<IChainlinkOracle>;
 
   let provider: JsonRpcProvider;
 
@@ -33,18 +39,21 @@ describe("curve steth bridge data", () => {
     wsteth: IWstETH = wstethContract as any,
     curvePool: ICurvePool = curvePoolContract as any,
     lidoOracle: ILidoOracle = lidoOracleContract as any,
+    chainlinkOracle: IChainlinkOracle = chainlinkOracleContract as any,
   ) => {
     IWstETH__factory.connect = () => wsteth as any;
     ICurvePool__factory.connect = () => curvePool as any;
     ILidoOracle__factory.connect = () => lidoOracle as any;
-    return CurveStethBridgeData.create(provider, EthAddress.ZERO, EthAddress.ZERO, EthAddress.ZERO); // can pass in dummy values here as the above factories do all of the work
+    IChainlinkOracle__factory.connect = () => chainlinkOracle as any;
+    // Can pass in dummy values bellow as the above factories do all of the work
+    return CurveStethBridgeData.create(bridgeAddressId, provider, EthAddress.ZERO, EthAddress.ZERO, EthAddress.ZERO, EthAddress.ZERO);
   };
 
   beforeAll(() => {
     provider = new JsonRpcProvider("https://mainnet.infura.io/v3/9928b52099854248b3a096be07a6b23c");
 
     ethAsset = {
-      id: 1,
+      id: 0,
       assetType: AztecAssetType.ETH,
       erc20Address: EthAddress.ZERO,
     };
@@ -58,6 +67,47 @@ describe("curve steth bridge data", () => {
       assetType: AztecAssetType.NOT_USED,
       erc20Address: EthAddress.ZERO,
     };
+  });
+
+  it("should correctly set auxData from Falafel when there is a batch with acceptable price", async () => {
+    const referenceBridgeCallData = "00000348050BA148140000000000000000000000000000000000000B00000011";
+    const stEthOraclePriceInEth = BigNumber.from("979711897527868700");
+
+    // Setup mocks
+    const falafelResponse = {
+      bridgeStatus: [
+        {
+          bridgeCallData: referenceBridgeCallData,
+        },
+        {
+          bridgeCallData: "000000000000000001000000000000000000000020000000000000060000000a",
+        },
+      ],
+    };
+    global.fetch = jest.fn(() =>
+      Promise.resolve({
+        json: () => Promise.resolve(falafelResponse),
+      }),
+    ) as any;
+
+    chainlinkOracleContract = {
+      ...chainlinkOracleContract,
+      latestRoundData: jest
+        .fn()
+        .mockReturnValueOnce([BigNumber.from(0), stEthOraclePriceInEth, BigNumber.from(0), BigNumber.from(0)])
+    };
+    IChainlinkOracle__factory.connect = () => chainlinkOracleContract as any;
+
+    const curveBridgeData = createCurveStethBridgeData(
+      wstethContract as any,
+      curvePoolContract as any,
+      lidoOracleContract as any,
+    );
+
+    const auxData = await curveBridgeData.getAuxData(wstETHAsset, emptyAsset, ethAsset, emptyAsset);
+
+    // The price in Falafel is acceptable so check that it was chosen
+    expect(auxData[0]).toBe(BridgeCallData.fromString(referenceBridgeCallData).auxData);
   });
 
   it("should get wstETH when deposit small amount of ETH", async () => {

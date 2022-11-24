@@ -14,6 +14,8 @@ import {
   IWstETH__factory,
   ILidoOracle__factory,
   ICurvePool__factory,
+  IChainlinkOracle__factory,
+  IChainlinkOracle,
 } from "../../../../typechain-types/index.js";
 import { EthereumProvider } from "@aztec/barretenberg/blockchain";
 import { createWeb3Provider } from "../../aztec/provider/web3_provider.js";
@@ -21,25 +23,31 @@ import { EthAddress } from "@aztec/barretenberg/address";
 import { AssetValue } from "@aztec/barretenberg/asset";
 
 export class CurveStethBridgeData implements BridgeDataFieldGetters {
-  public scalingFactor: bigint = 1n * 10n ** 18n;
+  public readonly scalingFactor: bigint = 1n * 10n ** 18n;
+  public readonly wstEthAddress: EthAddress = EthAddress.fromString("0x7f39C581F595B53c5cb19bD0b3f8dA6c935E2Ca0");
 
   private constructor(
+    private bridgeAddressId: number,
     private wstETHContract: IWstETH,
     private lidoOracleContract: ILidoOracle,
     private curvePoolContract: ICurvePool,
+    private chainlinkOracleContract: IChainlinkOracle,
   ) {}
 
   static create(
+    bridgeAddressId: number,
     provider: EthereumProvider,
     wstEthAddress: EthAddress,
     lidoOracleAddress: EthAddress,
     curvePoolAddress: EthAddress,
+    chainlinkOracleAddress: EthAddress,
   ) {
     const ethersProvider = createWeb3Provider(provider);
     const wstEthContract = IWstETH__factory.connect(wstEthAddress.toString(), ethersProvider);
     const lidoContract = ILidoOracle__factory.connect(lidoOracleAddress.toString(), ethersProvider);
     const curvePoolContract = ICurvePool__factory.connect(curvePoolAddress.toString(), ethersProvider);
-    return new CurveStethBridgeData(wstEthContract, lidoContract, curvePoolContract);
+    const chainlinkOracleContract = IChainlinkOracle__factory.connect(chainlinkOracleAddress.toString(), ethersProvider);
+    return new CurveStethBridgeData(bridgeAddressId, wstEthContract, lidoContract, curvePoolContract, chainlinkOracleContract);
   }
 
   // Unused
@@ -57,14 +65,21 @@ export class CurveStethBridgeData implements BridgeDataFieldGetters {
     return [];
   }
 
-  // Not applicable
   async getAuxData(
     inputAssetA: AztecAsset,
     inputAssetB: AztecAsset,
     outputAssetA: AztecAsset,
     outputAssetB: AztecAsset,
   ): Promise<bigint[]> {
-    return [0n];
+    if (inputAssetA.assetType === AztecAssetType.ETH && inputAssetB.assetType === AztecAssetType.NOT_USED && outputAssetA.erc20Address.equals(this.wstEthAddress) && outputAssetB.assetType === AztecAssetType.NOT_USED) {
+      // Buying wstETH
+      return [0n];
+    } if (inputAssetA.erc20Address.equals(this.wstEthAddress) && inputAssetB.assetType === AztecAssetType.NOT_USED && outputAssetA.assetType === AztecAssetType.ETH && outputAssetB.assetType === AztecAssetType.NOT_USED) {
+     // Selling wstETH
+     return [0n]
+    } else {
+      throw "Incorrect combination of input/output assets.";
+    }
   }
 
   async getExpectedOutput(
